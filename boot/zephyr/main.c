@@ -19,7 +19,7 @@
 #include <gpio.h>
 #include <misc/__assert.h>
 #include <flash.h>
-#include <drivers/system_timer.h>
+#include <drivers/timer/system_timer.h>
 #include <usb/usb_device.h>
 #include <soc.h>
 
@@ -38,6 +38,10 @@ const struct boot_uart_funcs boot_funcs = {
     .read = console_read,
     .write = console_write
 };
+#endif
+
+#ifdef CONFIG_BOOT_WAIT_FOR_USB_DFU
+#include <usb/class/usb_dfu.h>
 #endif
 
 MCUBOOT_LOG_MODULE_REGISTER(mcuboot);
@@ -71,7 +75,7 @@ static void do_boot(struct boot_rsp *rsp)
                                      rsp->br_hdr->ih_hdr_size);
     irq_lock();
     sys_clock_disable();
-#ifdef CONFIG_BOOT_SERIAL_CDC_ACM
+#ifdef CONFIG_USB
     /* Disable the USB to prevent it from firing interrupts */
     usb_disable();
 #endif
@@ -164,9 +168,9 @@ void main(void)
         while (1)
             ;
     }
-#elif (defined(CONFIG_XTENSA) && defined(DT_SPI_NOR_DRV_NAME))
-    if (!flash_device_get_binding(DT_SPI_NOR_DRV_NAME)) {
-        BOOT_LOG_ERR("Flash device %s not found", DT_SPI_NOR_DRV_NAME);
+#elif (defined(CONFIG_XTENSA) && defined(DT_JEDEC_SPI_NOR_0_LABEL))
+    if (!flash_device_get_binding(DT_JEDEC_SPI_NOR_0_LABEL)) {
+        BOOT_LOG_ERR("Flash device %s not found", DT_JEDEC_SPI_NOR_0_LABEL);
         while (1)
             ;
     }
@@ -195,6 +199,12 @@ void main(void)
         boot_serial_start(&boot_funcs);
         __ASSERT(0, "Bootloader serial process was terminated unexpectedly.\n");
     }
+#endif
+
+#ifdef CONFIG_BOOT_WAIT_FOR_USB_DFU
+    BOOT_LOG_INF("Waiting for USB DFU");
+    wait_for_usb_dfu();
+    BOOT_LOG_INF("USB DFU wait time elapsed");
 #endif
 
     rc = boot_go(&rsp);

@@ -31,12 +31,10 @@
 
 #include "mcuboot_config/mcuboot_config.h"
 
-#if defined(MCUBOOT_USE_MBED_TLS) && defined(MCUBOOT_USE_TINYCRYPT)
-    #error "Cannot define both MBED_TLS and TINYCRYPT"
-#endif
-
-#if !defined(MCUBOOT_USE_MBED_TLS) && !defined(MCUBOOT_USE_TINYCRYPT)
-    #error "One of MBED_TLS or TINYCRYPT must be defined"
+#if (defined(MCUBOOT_USE_MBED_TLS) + \
+     defined(MCUBOOT_USE_TINYCRYPT) + \
+     defined(MCUBOOT_USE_CC310)) != 1
+    #error "One crypto backend must be defined either CC310, MBED_TLS or TINYCRYPT"
 #endif
 
 #ifdef MCUBOOT_USE_MBED_TLS
@@ -46,6 +44,10 @@
 #ifdef MCUBOOT_USE_TINYCRYPT
     #include <tinycrypt/sha256.h>
 #endif /* MCUBOOT_USE_TINYCRYPT */
+
+#ifdef MCUBOOT_USE_CC310
+    #include <cc310_glue.h>
+#endif /* MCUBOOT_USE_CC310 */
 
 #include <stdint.h>
 
@@ -59,20 +61,20 @@ typedef mbedtls_sha256_context bootutil_sha256_context;
 static inline void bootutil_sha256_init(bootutil_sha256_context *ctx)
 {
     mbedtls_sha256_init(ctx);
-    mbedtls_sha256_starts(ctx, 0);
+    (void)mbedtls_sha256_starts_ret(ctx, 0);
 }
 
 static inline void bootutil_sha256_update(bootutil_sha256_context *ctx,
                                           const void *data,
                                           uint32_t data_len)
 {
-    mbedtls_sha256_update(ctx, data, data_len);
+    (void)mbedtls_sha256_update_ret(ctx, data, data_len);
 }
 
 static inline void bootutil_sha256_finish(bootutil_sha256_context *ctx,
                                           uint8_t *output)
 {
-    mbedtls_sha256_finish(ctx, output);
+    (void)mbedtls_sha256_finish_ret(ctx, output);
 }
 #endif /* MCUBOOT_USE_MBED_TLS */
 
@@ -96,6 +98,26 @@ static inline void bootutil_sha256_finish(bootutil_sha256_context *ctx,
     tc_sha256_final(output, ctx);
 }
 #endif /* MCUBOOT_USE_TINYCRYPT */
+
+#ifdef MCUBOOT_USE_CC310
+static inline void bootutil_sha256_init(bootutil_sha256_context *ctx)
+{
+    cc310_sha256_init(ctx);
+}
+
+static inline void bootutil_sha256_update(bootutil_sha256_context *ctx,
+                                          const void *data,
+                                          uint32_t data_len)
+{
+    cc310_sha256_update(ctx, data, data_len);
+}
+
+static inline void bootutil_sha256_finish(bootutil_sha256_context *ctx,
+                                          uint8_t *output)
+{
+    cc310_sha256_finalize(ctx, output);
+}
+#endif /* MCUBOOT_USE_CC310 */
 
 #ifdef __cplusplus
 }

@@ -1,6 +1,7 @@
 #! /usr/bin/env python3
 #
 # Copyright 2017 Linaro Limited
+# Copyright 2019 Arm Limited
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,15 +15,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import re
 import click
 import getpass
 import imgtool.keys as keys
+import sys
 from imgtool import image
 from imgtool.version import decode_version
 
 
 def gen_rsa2048(keyfile, passwd):
-    keys.RSA2048.generate().export_private(path=keyfile, passwd=passwd)
+    keys.RSA.generate().export_private(path=keyfile, passwd=passwd)
+
+
+def gen_rsa3072(keyfile, passwd):
+    keys.RSA.generate(key_size=3072).export_private(path=keyfile,
+                                                    passwd=passwd)
 
 
 def gen_ecdsa_p256(keyfile, passwd):
@@ -33,11 +41,17 @@ def gen_ecdsa_p224(keyfile, passwd):
     print("TODO: p-224 not yet implemented")
 
 
+def gen_ed25519(keyfile, passwd):
+    keys.Ed25519.generate().export_private(path=keyfile, passwd=passwd)
+
+
 valid_langs = ['c', 'rust']
 keygens = {
     'rsa-2048':   gen_rsa2048,
+    'rsa-3072':   gen_rsa3072,
     'ecdsa-p256': gen_ecdsa_p256,
     'ecdsa-p224': gen_ecdsa_p224,
+    'ed25519': gen_ed25519,
 }
 
 
@@ -90,6 +104,26 @@ def getpub(key, lang):
         raise ValueError("BUG: should never get here!")
 
 
+@click.argument('imgfile')
+@click.option('-k', '--key', metavar='filename')
+@click.command(help="Check that signed image can be verified by given key")
+def verify(key, imgfile):
+    key = load_key(key) if key else None
+    ret = image.Image.verify(imgfile, key)
+    if ret == image.VerifyResult.OK:
+        print("Image was correctly validated")
+        return
+    elif ret == image.VerifyResult.INVALID_MAGIC:
+        print("Invalid image magic; is this an MCUboot image?")
+    elif ret == image.VerifyResult.INVALID_MAGIC:
+        print("Invalid TLV info magic; is this an MCUboot image?")
+    elif ret == image.VerifyResult.INVALID_HASH:
+        print("Image has an invalid sha256 digest")
+    elif ret == image.VerifyResult.INVALID_SIGNATURE:
+        print("No signature found for the given key")
+    sys.exit(1)
+
+
 def validate_version(ctx, param, value):
     try:
         decode_version(value)
@@ -104,6 +138,29 @@ def validate_header_size(ctx, param, value):
         raise click.BadParameter(
             "Minimum value for -H/--header-size is {}".format(min_hdr_size))
     return value
+
+
+def get_dependencies(ctx, param, value):
+    if value is not None:
+        versions = []
+        images = re.findall(r"\((\d+)", value)
+        if len(images) == 0:
+            raise click.BadParameter(
+                "Image dependency format is invalid: {}".format(value))
+        raw_versions = re.findall(r",\s*([0-9.+]+)\)", value)
+        if len(images) != len(raw_versions):
+            raise click.BadParameter(
+                '''There's a mismatch between the number of dependency images
+                and versions in: {}'''.format(value))
+        for raw_version in raw_versions:
+            try:
+                versions.append(decode_version(raw_version))
+            except ValueError as e:
+                raise click.BadParameter("{}".format(e))
+        dependencies = dict()
+        dependencies[image.DEP_IMAGES_KEY] = images
+        dependencies[image.DEP_VERSIONS_KEY] = versions
+        return dependencies
 
 
 class BasedIntParamType(click.ParamType):
@@ -138,6 +195,9 @@ class BasedIntParamType(click.ParamType):
               help='Add --header-size zeroed bytes at the beginning of the image')
 @click.option('-H', '--header-size', callback=validate_header_size,
               type=BasedIntParamType(), required=True)
+@click.option('-d', '--dependencies', callback=get_dependencies,
+              required=False, help='''Add dependence on another image, format:
+              "(<image_ID>,<image_version>), ... "''')
 @click.option('-v', '--version', callback=validate_version,  required=True)
 @click.option('--align', type=click.Choice(['1', '2', '4', '8']),
               required=True)
@@ -146,7 +206,8 @@ class BasedIntParamType(click.ParamType):
                INFILE and OUTFILE are parsed as Intel HEX if the params have
                .hex extension, othewise binary format is used''')
 def sign(key, align, version, header_size, pad_header, slot_size, pad,
-         max_sectors, overwrite_only, endian, encrypt, infile, outfile):
+         max_sectors, overwrite_only, endian, encrypt, infile, outfile,
+         dependencies):
     img = image.Image(version=decode_version(version), header_size=header_size,
                       pad_header=pad_header, pad=pad, align=int(align),
                       slot_size=slot_size, max_sectors=max_sectors,
@@ -155,11 +216,11 @@ def sign(key, align, version, header_size, pad_header, slot_size, pad,
     key = load_key(key) if key else None
     enckey = load_key(encrypt) if encrypt else None
     if enckey:
-        if not isinstance(enckey, (keys.RSA2048, keys.RSA2048Public)):
-            raise Exception("Encryption only available with RSA")
-        if key and not isinstance(key, (keys.RSA2048, keys.RSA2048Public)):
-            raise Exception("Encryption with sign only available with RSA")
-    img.create(key, enckey)
+        if not isinstance(enckey, (keys.RSA, keys.RSAPublic)):
+            raise Exception("Encryption only available with RSA key")
+        if key and not isinstance(key, keys.RSA):
+            raise Exception("Signing only available with private RSA key")
+    img.create(key, enckey, dependencies)
     img.save(outfile)
 
 
@@ -191,6 +252,7 @@ def imgtool():
 
 imgtool.add_command(keygen)
 imgtool.add_command(getpub)
+imgtool.add_command(verify)
 imgtool.add_command(sign)
 
 

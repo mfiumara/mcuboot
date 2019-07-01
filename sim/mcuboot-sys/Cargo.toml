@@ -15,23 +15,32 @@ default = []
 # compile with both sig-rsa and sig-ecdsa enabled.
 sig-rsa = []
 
+# Verify RSA-3072 signatures.
+sig-rsa3072 = []
+
 # Verify ECDSA (secp256r1) signatures.
 sig-ecdsa = []
+
+# Verify ED25519 signatures.
+sig-ed25519 = []
 
 # Overwrite only upgrade
 overwrite-only = []
 
-# Disable validation of slot0
-validate-slot0 = []
+# Disable validation of the primary slot
+validate-primary-slot = []
 
-# Encrypt image in slot1 using RSA-OAEP-2048
+# Encrypt image in the secondary slot using RSA-OAEP-2048
 enc-rsa = []
 
-# Encrypt image in slot1 using AES-KW-128
+# Encrypt image in the secondary slot using AES-KW-128
 enc-kw = []
 
-# Allow bootstrapping an empty/invalid slot0 from a valid slot1
+# Allow bootstrapping an empty/invalid primary slot from a valid secondary slot
 bootstrap = []
+
+# Support multiple images (currently 2 instead of 1).
+multiimage = []
 
 [build-dependencies]
 cc = "1.0.25"

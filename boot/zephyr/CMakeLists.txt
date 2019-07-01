@@ -7,17 +7,6 @@
 cmake_minimum_required(VERSION 3.8.2)
 
 # Board-specific CONF_FILES should get merged into the build as well.
-#
-# Do this by defining the set_conf_file macro:
-# http://docs.zephyrproject.org/application/application.html#application-configuration
-macro(set_conf_file)
-  if (EXISTS ${APPLICATION_SOURCE_DIR}/boards/${BOARD}.conf)
-    set(CONF_FILE "prj.conf ${APPLICATION_SOURCE_DIR}/boards/${BOARD}.conf")
-  else()
-    set(CONF_FILE prj.conf)
-  endif()
-endmacro()
-
 # Default to qemu_x86 if no board has been specified.
 set(BOARD qemu_x86)
 
@@ -27,14 +16,18 @@ set(BOARD qemu_x86)
 # the list).
 if(DTC_OVERLAY_FILE)
   set(DTC_OVERLAY_FILE
-      "${DTC_OVERLAY_FILE} ${CMAKE_CURRENT_LIST_DIR}/dts.overlay")
+    "${DTC_OVERLAY_FILE} ${CMAKE_CURRENT_LIST_DIR}/dts.overlay"
+    CACHE STRING "" FORCE
+    )
 else()
   set(DTC_OVERLAY_FILE ${CMAKE_CURRENT_LIST_DIR}/dts.overlay)
 endif()
 
 if (EXISTS ${CMAKE_CURRENT_LIST_DIR}/boards/${BOARD}.overlay)
   set(DTC_OVERLAY_FILE
-      "${DTC_OVERLAY_FILE} ${CMAKE_CURRENT_LIST_DIR}/boards/${BOARD}.overlay")
+    "${DTC_OVERLAY_FILE} ${CMAKE_CURRENT_LIST_DIR}/boards/${BOARD}.overlay"
+    CACHE STRING "" FORCE
+    )
 endif()
 
 # Enable Zephyr runner options which request mass erase if so
@@ -52,7 +45,8 @@ endif()
 macro(app_set_runner_args)
   if(CONFIG_ZEPHYR_TRY_MASS_ERASE)
     board_runner_args(dfu-util "--dfuse-modifiers=force:mass-erase")
-    board_runner_args(pyocd "--flashtool-opt=-ce")
+    board_runner_args(pyocd "--flash-opt=-e=chip")
+    board_runner_args(nrfjprog "--erase")
   endif()
 endmacro()
 
@@ -67,8 +61,21 @@ get_filename_component(BOOT_DIR ${APPLICATION_SOURCE_DIR} DIRECTORY)
 get_filename_component(MCUBOOT_DIR ${BOOT_DIR} DIRECTORY)
 # Path to tinycrypt library source subdirectory of MCUBOOT_DIR.
 set(TINYCRYPT_DIR "${MCUBOOT_DIR}/ext/tinycrypt/lib")
+assert_exists(TINYCRYPT_DIR)
+# Path to crypto-fiat
+set(FIAT_DIR "${MCUBOOT_DIR}/ext/fiat")
+assert_exists(FIAT_DIR)
 # Path to mbed-tls' asn1 parser library.
 set(MBEDTLS_ASN1_DIR "${MCUBOOT_DIR}/ext/mbedtls")
+assert_exists(MBEDTLS_ASN1_DIR)
+set(NRF_DIR "${MCUBOOT_DIR}/ext/nrf")
+
+if(CONFIG_BOOT_USE_NRF_CC310_BL)
+set(NRFXLIB_DIR ${MCUBOOT_DIR}/../nrfxlib)
+assert_exists(NRFXLIB_DIR)
+# Don't include this if we are using west
+ add_subdirectory(${NRFXLIB_DIR} ${PROJECT_BINARY_DIR}/nrfxlib)
+endif()
 
 zephyr_library_include_directories(
   include
@@ -101,15 +108,24 @@ zephyr_library_sources(
   ${BOOT_DIR}/bootutil/src/encrypted.c
   ${BOOT_DIR}/bootutil/src/image_rsa.c
   ${BOOT_DIR}/bootutil/src/image_ec256.c
+  ${BOOT_DIR}/bootutil/src/image_ed25519.c
   ${BOOT_DIR}/bootutil/src/caps.c
   )
 
 if(CONFIG_BOOT_SIGNATURE_TYPE_ECDSA_P256)
+  zephyr_library_include_directories(
+	${MBEDTLS_ASN1_DIR}/include
+  )
+  zephyr_library_sources(
+	# Additionally pull in just the ASN.1 parser from mbedTLS.
+	${MBEDTLS_ASN1_DIR}/src/asn1parse.c
+	${MBEDTLS_ASN1_DIR}/src/platform_util.c
+	)
+  if(CONFIG_BOOT_USE_TINYCRYPT)
   # When using ECDSA signatures, pull in our copy of the tinycrypt library.
   zephyr_library_include_directories(
 	 ${BOOT_DIR}/zephyr/include
 	   ${TINYCRYPT_DIR}/include
-	${MBEDTLS_ASN1_DIR}/include
 	)
 
   zephyr_library_sources(
@@ -117,11 +133,12 @@ if(CONFIG_BOOT_SIGNATURE_TYPE_ECDSA_P256)
 	${TINYCRYPT_DIR}/source/ecc_dsa.c
 	${TINYCRYPT_DIR}/source/sha256.c
 	${TINYCRYPT_DIR}/source/utils.c
-
-	# Additionally pull in just the ASN.1 parser from mbedTLS.
-	${MBEDTLS_ASN1_DIR}/src/asn1parse.c
-	${MBEDTLS_ASN1_DIR}/src/platform_util.c
-	)
+  )
+  elseif(CONFIG_BOOT_USE_NRF_CC310_BL)
+    zephyr_library_sources(${NRF_DIR}/cc310_glue.c)
+    zephyr_library_include_directories(${NRF_DIR})
+    zephyr_link_libraries(nrfxlib_crypto)
+  endif()
 
   # Since here we are not using Zephyr's mbedTLS but rather our own, we need
   # to set MBEDTLS_CONFIG_FILE ourselves. When using Zephyr's copy, this
@@ -133,6 +150,18 @@ elseif(CONFIG_BOOT_SIGNATURE_TYPE_RSA)
   # Use mbedTLS provided by Zephyr for RSA signatures. (Its config file
   # is set using Kconfig.)
   zephyr_include_directories(include)
+elseif(CONFIG_BOOT_SIGNATURE_TYPE_ED25519)
+  # For ed25519, mbedTLS is used for ASN1 parsing and SHA512
+  zephyr_include_directories(include)
+
+  zephyr_library_include_directories(
+    ${BOOT_DIR}/zephyr/include
+    ${FIAT_DIR}/include/
+  )
+
+  zephyr_library_sources(
+    ${FIAT_DIR}/src/curve25519.c
+  )
 endif()
 
 if(CONFIG_MCUBOOT_SERIAL)
@@ -174,3 +203,4 @@ if(NOT CONFIG_BOOT_SIGNATURE_KEY_FILE STREQUAL "")
     )
   zephyr_library_sources(${GENERATED_PUBKEY})
 endif()
+

@@ -27,7 +27,7 @@ impl AreaDesc {
 
     /// Add a slot to the image.  The slot must align with erasable units in the flash device.
     /// Panics if the description is not valid.  There are also bootloader assumptions that the
-    /// slots are SLOT0, SLOT1, and SCRATCH in that order.
+    /// slots are PRIMARY_SLOT, SECONDARY_SLOT, and SCRATCH in that order.
     pub fn add_image(&mut self, base: usize, len: usize, id: FlashId, dev_id: u8) {
         let nid = id as usize;
         let orig_base = base;
@@ -107,15 +107,15 @@ impl AreaDesc {
     }
 
     // Look for the image with the given ID, and return its offset, size and
-    // device id. Panics if the area is not present.
-    pub fn find(&self, id: FlashId) -> (usize, usize, u8) {
+    // device id. Returns None if the area is not present.
+    pub fn find(&self, id: FlashId) -> Option<(usize, usize, u8)> {
         for area in &self.whole {
             // FIXME: should we ensure id is not duplicated over multiple devices?
             if area.flash_id == id {
-                return (area.off as usize, area.size as usize, area.device_id);
+                return Some((area.off as usize, area.size as usize, area.device_id));
             }
         }
-        panic!("Requesting area that is not present in flash");
+        None
     }
 
     pub fn get_c(&self) -> CAreaDesc {
@@ -176,9 +176,8 @@ pub enum FlashId {
     Image0 = 1,
     Image1 = 2,
     ImageScratch = 3,
-    Nffs = 4,
-    Core = 5,
-    RebootLog = 6
+    Image2 = 4,
+    Image3 = 5,
 }
 
 impl Default for FlashId {
@@ -196,4 +195,3 @@ pub struct FlashArea {
     off: u32,
     size: u32,
 }
-

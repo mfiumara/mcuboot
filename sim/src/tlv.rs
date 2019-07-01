@@ -16,6 +16,7 @@ use ring::signature::{
     RSA_PSS_SHA256,
     EcdsaKeyPair,
     ECDSA_P256_SHA256_ASN1_SIGNING,
+    Ed25519KeyPair,
 };
 use untrusted;
 use mcuboot_sys::c;
@@ -29,6 +30,8 @@ pub enum TlvKinds {
     RSA2048 = 0x20,
     ECDSA224 = 0x21,
     ECDSA256 = 0x22,
+    RSA3072 = 0x23,
+    ED25519 = 0x24,
     ENCRSA2048 = 0x30,
     ENCKW128 = 0x31,
 }
@@ -39,6 +42,23 @@ pub enum TlvFlags {
     NON_BOOTABLE = 0x02,
     ENCRYPTED = 0x04,
     RAM_LOAD = 0x20,
+}
+
+/// A generator for manifests.  The format of the manifest can be either a
+/// traditional "TLV" or a SUIT-style manifest.
+pub trait ManifestGen {
+    /// Retrieve the header magic value for this manifest type.
+    fn get_magic(&self) -> u32;
+
+    /// Retrieve the flags value for this particular manifest type.
+    fn get_flags(&self) -> u32;
+
+    /// Add a sequence of bytes to the payload that the manifest is
+    /// protecting.
+    fn add_bytes(&mut self, bytes: &[u8]);
+
+    /// Construct the manifest for this payload.
+    fn make_tlv(self: Box<Self>) -> Vec<u8>;
 }
 
 pub struct TlvGen {
@@ -73,11 +93,31 @@ impl TlvGen {
     }
 
     #[allow(dead_code)]
+    pub fn new_rsa3072_pss() -> TlvGen {
+        TlvGen {
+            flags: 0,
+            kinds: vec![TlvKinds::SHA256, TlvKinds::RSA3072],
+            size: 4 + 32 + 4 + 32 + 4 + 384,
+            payload: vec![],
+        }
+    }
+
+    #[allow(dead_code)]
     pub fn new_ecdsa() -> TlvGen {
         TlvGen {
             flags: 0,
             kinds: vec![TlvKinds::SHA256, TlvKinds::ECDSA256],
             size: 4 + 32 + 4 + 32 + 4 + 72,
+            payload: vec![],
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn new_ed25519() -> TlvGen {
+        TlvGen {
+            flags: 0,
+            kinds: vec![TlvKinds::SHA256, TlvKinds::ED25519],
+            size: 4 + 32 + 4 + 32 + 4 + 64,
             payload: vec![],
         }
     }
@@ -132,23 +172,29 @@ impl TlvGen {
         }
     }
 
-    /// Retrieve the header flags for this configuration.  This can be called at any time.
-    pub fn get_flags(&self) -> u32 {
-        self.flags
-    }
-
     /// Retrieve the size that the TLV will occupy.  This can be called at any time.
     pub fn get_size(&self) -> u16 {
         4 + self.size
     }
+}
+
+impl ManifestGen for TlvGen {
+    fn get_magic(&self) -> u32 {
+        0x96f3b83d
+    }
+
+    /// Retrieve the header flags for this configuration.  This can be called at any time.
+    fn get_flags(&self) -> u32 {
+        self.flags
+    }
 
     /// Add bytes to the covered hash.
-    pub fn add_bytes(&mut self, bytes: &[u8]) {
+    fn add_bytes(&mut self, bytes: &[u8]) {
         self.payload.extend_from_slice(bytes);
     }
 
     /// Compute the TLV given the specified block of data.
-    pub fn make_tlv(self) -> Vec<u8> {
+    fn make_tlv(self: Box<Self>) -> Vec<u8> {
         let mut result: Vec<u8> = vec![];
 
         let size = self.get_size();
@@ -169,9 +215,17 @@ impl TlvGen {
             result.extend_from_slice(hash);
         }
 
-        if self.kinds.contains(&TlvKinds::RSA2048) {
+        if self.kinds.contains(&TlvKinds::RSA2048) ||
+            self.kinds.contains(&TlvKinds::RSA3072) {
+
+            let is_rsa2048 = self.kinds.contains(&TlvKinds::RSA2048);
+
             // Output the hash of the public key.
-            let hash = digest::digest(&digest::SHA256, RSA_PUB_KEY);
+            let hash = if is_rsa2048 {
+                digest::digest(&digest::SHA256, RSA_PUB_KEY)
+            } else {
+                digest::digest(&digest::SHA256, RSA3072_PUB_KEY)
+            };
             let hash = hash.as_ref();
 
             assert!(hash.len() == 32);
@@ -182,16 +236,28 @@ impl TlvGen {
             result.extend_from_slice(hash);
 
             // For now assume PSS.
-            let key_bytes = pem::parse(include_bytes!("../../root-rsa-2048.pem").as_ref()).unwrap();
+            let key_bytes = if is_rsa2048 {
+                pem::parse(include_bytes!("../../root-rsa-2048.pem").as_ref()).unwrap()
+            } else {
+                pem::parse(include_bytes!("../../root-rsa-3072.pem").as_ref()).unwrap()
+            };
             assert_eq!(key_bytes.tag, "RSA PRIVATE KEY");
             let key_bytes = untrusted::Input::from(&key_bytes.contents);
             let key_pair = RsaKeyPair::from_der(key_bytes).unwrap();
             let rng = rand::SystemRandom::new();
             let mut signature = vec![0; key_pair.public_modulus_len()];
-            assert_eq!(signature.len(), 256);
+            if is_rsa2048 {
+                assert_eq!(signature.len(), 256);
+            } else {
+                assert_eq!(signature.len(), 384);
+            }
             key_pair.sign(&RSA_PSS_SHA256, &rng, &self.payload, &mut signature).unwrap();
 
-            result.push(TlvKinds::RSA2048 as u8);
+            if is_rsa2048 {
+                result.push(TlvKinds::RSA2048 as u8);
+            } else {
+                result.push(TlvKinds::RSA3072 as u8);
+            }
             result.push(0);
             result.push((signature.len() & 0xFF) as u8);
             result.push(((signature.len() >> 8) & 0xFF) as u8);
@@ -229,6 +295,38 @@ impl TlvGen {
                 signature[1] += 1;
             }
 
+            result.push((signature.len() & 0xFF) as u8);
+            result.push(((signature.len() >> 8) & 0xFF) as u8);
+            result.extend_from_slice(signature.as_ref());
+        }
+
+        if self.kinds.contains(&TlvKinds::ED25519) {
+            let keyhash = digest::digest(&digest::SHA256, ED25519_PUB_KEY);
+            let keyhash = keyhash.as_ref();
+
+            assert!(keyhash.len() == 32);
+            result.push(TlvKinds::KEYHASH as u8);
+            result.push(0);
+            result.push(32);
+            result.push(0);
+            result.extend_from_slice(keyhash);
+
+            let hash = digest::digest(&digest::SHA256, &self.payload);
+            let hash = hash.as_ref();
+            assert!(hash.len() == 32);
+
+            let key_bytes = pem::parse(include_bytes!("../../root-ed25519.pem").as_ref()).unwrap();
+            assert_eq!(key_bytes.tag, "PRIVATE KEY");
+
+            let seed = untrusted::Input::from(&key_bytes.contents[16..48]);
+            let public = untrusted::Input::from(&ED25519_PUB_KEY[12..44]);
+            let key_pair = Ed25519KeyPair::from_seed_and_public_key(seed, public).unwrap();
+            let signature = key_pair.sign(&hash);
+
+            result.push(TlvKinds::ED25519 as u8);
+            result.push(0);
+
+            let signature = signature.as_ref().to_vec();
             result.push((signature.len() & 0xFF) as u8);
             result.push(((signature.len() >> 8) & 0xFF) as u8);
             result.extend_from_slice(signature.as_ref());
@@ -274,4 +372,6 @@ impl TlvGen {
 }
 
 include!("rsa_pub_key-rs.txt");
+include!("rsa3072_pub_key-rs.txt");
 include!("ecdsa_pub_key-rs.txt");
+include!("ed25519_pub_key-rs.txt");

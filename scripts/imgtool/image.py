@@ -1,5 +1,6 @@
 # Copyright 2018 Nordic Semiconductor ASA
 # Copyright 2017 Linaro Limited
+# Copyright 2019 Arm Limited
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,6 +19,7 @@ Image signing and management.
 """
 
 from . import version as versmod
+from enum import Enum
 from intelhex import IntelHex
 import hashlib
 import struct
@@ -26,12 +28,15 @@ from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
+from cryptography.exceptions import InvalidSignature
 
 IMAGE_MAGIC = 0x96f3b83d
 IMAGE_HEADER_SIZE = 32
 BIN_EXT = "bin"
 INTEL_HEX_EXT = "hex"
 DEFAULT_MAX_SECTORS = 128
+DEP_IMAGES_KEY = "images"
+DEP_VERSIONS_KEY = "versions"
 
 # Image header flags.
 IMAGE_F = {
@@ -46,10 +51,14 @@ TLV_VALUES = {
         'RSA2048': 0x20,
         'ECDSA224': 0x21,
         'ECDSA256': 0x22,
+        'RSA3072': 0x23,
+        'ED25519': 0x24,
         'ENCRSA2048': 0x30,
         'ENCKW128': 0x31,
+        'DEPENDENCY': 0x40
 }
 
+TLV_SIZE = 4
 TLV_INFO_SIZE = 4
 TLV_INFO_MAGIC = 0x6907
 
@@ -63,6 +72,13 @@ STRUCT_ENDIAN_DICT = {
         'little': '<',
         'big':    '>'
 }
+
+VerifyResult = Enum('VerifyResult',
+                    """
+                    OK INVALID_MAGIC INVALID_TLV_INFO_MAGIC INVALID_HASH
+                    INVALID_SIGNATURE
+                    """)
+
 
 class TLV():
     def __init__(self, endian):
@@ -168,10 +184,48 @@ class Image():
                         len(self.payload), tsize, self.slot_size)
                 raise Exception(msg)
 
-    def create(self, key, enckey):
-        self.add_header(enckey)
+    def create(self, key, enckey, dependencies=None):
+        if dependencies is None:
+            dependencies_num = 0
+            protected_tlv_size = 0
+        else:
+            # Size of a Dependency TLV = Header ('BBH') + Payload('IBBHI')
+            # = 16 Bytes
+            dependencies_num = len(dependencies[DEP_IMAGES_KEY])
+            protected_tlv_size = (dependencies_num * 16) + TLV_INFO_SIZE
+
+        self.add_header(enckey, protected_tlv_size)
 
         tlv = TLV(self.endian)
+
+        if protected_tlv_size != 0:
+            for i in range(dependencies_num):
+                e = STRUCT_ENDIAN_DICT[self.endian]
+                payload = struct.pack(
+                                e + 'I'+'BBHI',
+                                int(dependencies[DEP_IMAGES_KEY][i]),
+                                dependencies[DEP_VERSIONS_KEY][i].major,
+                                dependencies[DEP_VERSIONS_KEY][i].minor,
+                                dependencies[DEP_VERSIONS_KEY][i].revision,
+                                dependencies[DEP_VERSIONS_KEY][i].build
+                                )
+                tlv.add('DEPENDENCY', payload)
+            # Full TLV size needs to be calculated in advance, because the
+            # header will be protected as well
+            tlv_header_size = 4
+            payload_digest_size = 32
+            keyhash_size = 32
+            cipherkey_size = 32
+
+            full_size = TLV_INFO_SIZE + len(tlv.buf) + tlv_header_size \
+                        + payload_digest_size
+            if key is not None:
+                full_size += tlv_header_size + keyhash_size \
+                             + tlv_header_size + key.sig_len()
+            if enckey is not None:
+                full_size += tlv_header_size + cipherkey_size
+            tlv_header = struct.pack(e + 'HH', TLV_INFO_MAGIC, full_size)
+            self.payload += tlv_header + bytes(tlv.buf)
 
         # Note that ecdsa wants to do the hashing itself, which means
         # we get to hash it twice.
@@ -190,7 +244,13 @@ class Image():
             pubbytes = sha.digest()
             tlv.add('KEYHASH', pubbytes)
 
-            sig = key.sign(bytes(self.payload))
+            # `sign` expects the full image payload (sha256 done internally),
+            # while `sign_digest` expects only the digest of the payload
+
+            if hasattr(key, 'sign'):
+                sig = key.sign(bytes(self.payload))
+            else:
+                sig = key.sign_digest(digest)
             tlv.add(key.sig_tlv(), sig)
 
         if enckey is not None:
@@ -210,9 +270,9 @@ class Image():
             self.payload[self.header_size:] = encryptor.update(img) + \
                                               encryptor.finalize()
 
-        self.payload += tlv.get()
+        self.payload += tlv.get()[protected_tlv_size:]
 
-    def add_header(self, enckey):
+    def add_header(self, enckey, protected_tlv_size):
         """Install the image header."""
 
         flags = 0
@@ -221,29 +281,29 @@ class Image():
 
         e = STRUCT_ENDIAN_DICT[self.endian]
         fmt = (e +
-            # type ImageHdr struct {
-            'I' +   # Magic uint32
-            'I' +   # LoadAddr uint32
-            'H' +   # HdrSz uint16
-            'H' +   # Pad1  uint16
-            'I' +   # ImgSz uint32
-            'I' +   # Flags uint32
-            'BBHI' + # Vers  ImageVersion
-            'I'     # Pad2  uint32
-            ) # }
+               # type ImageHdr struct {
+               'I' +     # Magic    uint32
+               'I' +     # LoadAddr uint32
+               'H' +     # HdrSz    uint16
+               'H' +     # PTLVSz   uint16
+               'I' +     # ImgSz    uint32
+               'I' +     # Flags    uint32
+               'BBHI' +  # Vers     ImageVersion
+               'I'       # Pad1     uint32
+               )  # }
         assert struct.calcsize(fmt) == IMAGE_HEADER_SIZE
         header = struct.pack(fmt,
                 IMAGE_MAGIC,
                 0, # LoadAddr
                 self.header_size,
-                0, # Pad1
+                protected_tlv_size,  # TLV Info header + Dependency TLVs
                 len(self.payload) - self.header_size, # ImageSz
                 flags, # Flags
                 self.version.major,
                 self.version.minor or 0,
                 self.version.revision or 0,
                 self.version.build or 0,
-                0) # Pad2
+                0)  # Pad1
         self.payload = bytearray(self.payload)
         self.payload[:len(header)] = header
 
@@ -266,3 +326,50 @@ class Image():
         pbytes += b'\xff' * (tsize - len(boot_magic))
         pbytes += boot_magic
         self.payload += pbytes
+
+    @staticmethod
+    def verify(imgfile, key):
+        with open(imgfile, "rb") as f:
+            b = f.read()
+
+        magic, _, header_size, _, img_size = struct.unpack('IIHHI', b[:16])
+        if magic != IMAGE_MAGIC:
+            return VerifyResult.INVALID_MAGIC
+
+        tlv_info = b[header_size+img_size:header_size+img_size+TLV_INFO_SIZE]
+        magic, tlv_tot = struct.unpack('HH', tlv_info)
+        if magic != TLV_INFO_MAGIC:
+            return VerifyResult.INVALID_TLV_INFO_MAGIC
+
+        sha = hashlib.sha256()
+        sha.update(b[:header_size+img_size])
+        digest = sha.digest()
+
+        tlv_off = header_size + img_size
+        tlv_end = tlv_off + tlv_tot
+        tlv_off += TLV_INFO_SIZE  # skip tlv info
+        while tlv_off < tlv_end:
+            tlv = b[tlv_off:tlv_off+TLV_SIZE]
+            tlv_type, _, tlv_len = struct.unpack('BBH', tlv)
+            if tlv_type == TLV_VALUES["SHA256"]:
+                off = tlv_off + TLV_SIZE
+                if digest == b[off:off+tlv_len]:
+                    if key is None:
+                        return VerifyResult.OK
+                else:
+                    return VerifyResult.INVALID_HASH
+            elif key is not None and tlv_type == TLV_VALUES[key.sig_tlv()]:
+                off = tlv_off + TLV_SIZE
+                tlv_sig = b[off:off+tlv_len]
+                payload = b[:header_size+img_size]
+                try:
+                    if hasattr(key, 'verify'):
+                        key.verify(tlv_sig, payload)
+                    else:
+                        key.verify_digest(tlv_sig, digest)
+                    return VerifyResult.OK
+                except InvalidSignature:
+                    # continue to next TLV
+                    pass
+            tlv_off += TLV_SIZE + tlv_len
+        return VerifyResult.INVALID_SIGNATURE

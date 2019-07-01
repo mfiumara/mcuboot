@@ -31,6 +31,9 @@ pkg.apis:
 pkg.cflags:
     - "-DMCUBOOT_MYNEWT"
 
+pkg.cflags.BOOTUTIL_USE_MBED_TLS:
+    - '-DMBEDTLS_USER_CONFIG_FILE="mbedtls/config_mynewt.h"'
+
 pkg.deps:
     - "@mcuboot/boot/mynewt/mcuboot_config"
     - "@apache-mynewt-core/hw/hal"
@@ -44,3 +47,7 @@ pkg.deps.BOOTUTIL_USE_MBED_TLS:
 pkg.deps.BOOTUTIL_USE_TINYCRYPT:
     - "@mcuboot/ext/tinycrypt/lib"
     - "@mcuboot/ext/mbedtls"
+
+pkg.deps.BOOTUTIL_SIGN_ED25519:
+    - "@apache-mynewt-core/crypto/mbedtls"
+    - "@mcuboot/ext/fiat"
