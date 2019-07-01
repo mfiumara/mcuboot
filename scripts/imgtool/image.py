@@ -179,6 +179,8 @@ class Image():
         sha.update(self.payload)
         digest = sha.digest()
 
+        print(digest.hex())
+
         tlv.add('SHA256', digest)
 
         if key is not None:
