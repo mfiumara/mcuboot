@@ -175,6 +175,12 @@ void main(void)
             ;
     }
 #endif
+	struct device *spi_flash = device_get_binding(DT_JEDEC_SPI_NOR_0_LABEL);
+	if (!spi_flash) {
+		BOOT_LOG_ERR("External Flash %s not found", DT_JEDEC_SPI_NOR_0_LABEL);
+	} else {
+		BOOT_LOG_INF("External Flash %s found", DT_JEDEC_SPI_NOR_0_LABEL);
+	}
 
 #ifdef CONFIG_MCUBOOT_SERIAL
 
